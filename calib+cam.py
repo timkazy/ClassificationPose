@@ -13,7 +13,7 @@ from sklearn.ensemble import RandomForestClassifier
 from sklearn.preprocessing import StandardScaler
 
 # ==================== МОДЕЛЬ И ТРЕКЕР ====================
-MODEL_NAME = "yolo11n-pose.pt"      # Лучшая лёгкая pose-модель 2025
+MODEL_NAME = "yolo/yolo11n-pose.pt"      # Лучшая лёгкая pose-модель 2025
 TRACKER = "bytetrack.yaml"
 
 # ==================== ШРИФТ (кириллица) ====================
