@@ -36,15 +36,48 @@ def create_calibration_file_if_not_exists(filename='calibration_data.pkl'):
     return None
 
 # === Функция загрузки и обучения модели из файла ===
-def load_and_train_from_file(filename='calibration_data.pkl'):
-    # Сначала проверяем, существует ли файл, и создаем если нет
+def load_and_train_from_file(filename='trained_data.pkl'):
+    """Загружает предобученную модель из trained_data.pkl"""
+    try:
+        with open(filename, 'rb') as f:
+            loaded_data = pickle.load(f)
+        
+        print(f"Найден файл {filename}, загружаем обученную модель...")
+        
+        # Проверяем структуру данных
+        if 'model' in loaded_data and 'class_labels' in loaded_data:
+            clf = loaded_data['model']
+            method_name = loaded_data.get('method_name', 'Unknown')
+            print(f"Модель успешно загружена из {filename}!")
+            print(f"Метод обучения: {method_name}")
+            
+            # Загружаем сырые данные для калибровки, если они есть
+            if os.path.exists('raw_calibration_data.pkl'):
+                with open('raw_calibration_data.pkl', 'rb') as f_calib:
+                    calib_data = pickle.load(f_calib)
+                print(f"Сырые данные калибровки: {sum(len(v) for v in calib_data.values())} образцов")
+            else:
+                calib_data = {1: [], 2: [], 3: []}
+                
+            return clf, calib_data
+        else:
+            print("Файл не содержит модель в ожидаемом формате.")
+            return None, {1: [], 2: [], 3: []}
+    except Exception as e:
+        print(f"Ошибка при загрузке файла {filename}: {e}")
+        print("Пытаемся загрузить старую калибровку...")
+        # Пробуем загрузить старую калибровку
+        return load_old_calibration()
+
+def load_old_calibration(filename='calibration_data.pkl'):
+    """Загружает старую калибровку для совместимости"""
     create_calibration_file_if_not_exists(filename)
     
     try:
         with open(filename, 'rb') as f:
             loaded_data = pickle.load(f)
         
-        print(f"Найден файл {filename}, загружаем калибровку...")
+        print(f"Загружаем калибровку из {filename}...")
         
         X = []
         y = []
@@ -72,12 +105,31 @@ def load_and_train_from_file(filename='calibration_data.pkl'):
         print("Создаем чистую калибровку...")
         return None, {1: [], 2: [], 3: []}
 
+# === Функция сохранения сырых данных ===
+def save_raw_data(data, filename='raw_calibration_data.pkl'):
+    """Сохраняет сырые данные калибровки в отдельный файл"""
+    try:
+        with open(filename, 'wb') as f:
+            pickle.dump(data, f)
+        print(f"Сырые данные сохранены в {filename}")
+        print(f"Общее количество образцов: {sum(len(v) for v in data.values())}")
+        for class_id in [1, 2, 3]:
+            print(f"  Класс {class_labels.get(class_id, class_id)}: {len(data.get(class_id, []))}")
+    except Exception as e:
+        print(f"Ошибка при сохранении сырых данных: {e}")
+
 # === Функция очистки всех меток калибровки ===
 def clear_calibration_data(filename='calibration_data.pkl'):
     """Очищает все метки в файле калибровки"""
     empty_data = {1: [], 2: [], 3: []}
     with open(filename, 'wb') as f:
         pickle.dump(empty_data, f)
+    
+    # Также очищаем сырые данные
+    if os.path.exists('raw_calibration_data.pkl'):
+        with open('raw_calibration_data.pkl', 'wb') as f:
+            pickle.dump(empty_data, f)
+    
     print(f"Все метки калибровки в {filename} были очищены.")
     return empty_data
 
@@ -208,15 +260,15 @@ def create_info_panel(people_info, calibration_mode, calibration_counts, fps=Non
     return panel
 
 # Загружаем лёгкую модель для детектирования лиц
-face_detector = YOLO('yolo/yolov11s-face.pt')
+face_detector = YOLO('yolo/yolov11l-face.pt')
 
 # === Инициализация ===
 mp_face_mesh = mp.solutions.face_mesh
 face_mesh = mp_face_mesh.FaceMesh(
     max_num_faces=12,
     refine_landmarks=True,
-    min_detection_confidence=0.4,
-    min_tracking_confidence=0.4,
+    min_detection_confidence=0.2,
+    min_tracking_confidence=0.2,
     static_image_mode=False
 )
 mp_drawing = mp.solutions.drawing_utils
@@ -340,12 +392,12 @@ def assign_ids(current_centers, previous_centers, max_id=20):
     return ids
 
 # === Загружаем данные при старте ===
-clf, data = load_and_train_from_file('calibration_data.pkl')
+clf, data = load_and_train_from_file('trained_data.pkl')
 calibration_mode = clf is None
 
 if clf is not None:
     calibration_mode = False
-    print("Запуск в режиме AUTO (калибровка уже есть)")
+    print("Запуск в режиме AUTO (обученная модель загружена)")
 else:
     print("Запуск в режиме КАЛИБРОВКИ")
 
@@ -401,7 +453,7 @@ while True:
         fps_frame_count = 0
     
     # ================== ДЕТЕКТИРОВАНИЕ ==================
-    yolo_results = face_detector(frame, device='cuda', conf=0.35, verbose=False)[0]
+    yolo_results = face_detector(frame, device='cuda', conf=0.3, verbose=False)[0]
     boxes = yolo_results.boxes.xyxy.cpu().numpy().astype(int) if yolo_results.boxes is not None else []
 
     processed_landmarks = []
@@ -660,6 +712,7 @@ while True:
                 print(f"Модель обучена на {len(X)} образцах!")
         
         if key == ord('v'):
+            save_raw_data(data, 'raw_calibration_data.pkl')
             with open('calibration_data.pkl', 'wb') as f:
                 pickle.dump(data, f)
             print("Калибровка сохранена!")

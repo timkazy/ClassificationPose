@@ -3,4 +3,6 @@
 /video
 /.venv
 /cuda_venv
+/old_venv
+/calibration_tree
 calibration_data.pkl
