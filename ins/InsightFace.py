@@ -28,6 +28,176 @@ class_colors = {
     "unknown": (128, 128, 128)  # Серый - неизвестно
 }
 
+# Для идентификации
+import glob
+from sklearn.metrics.pairwise import cosine_similarity
+
+class FaceDatabase:
+    def __init__(self, database_path='faces_database', similarity_threshold=0.6):
+        self.database_path = database_path
+        self.similarity_threshold = similarity_threshold
+        self.embeddings = []  # Список эмбеддингов
+        self.names = []       # Список имен (ФИО)
+        self.loaded = False
+        
+    def load_database(self, insight_app):
+        """Загружает все лица из базы и вычисляет эмбеддинги"""
+        print(f"Загрузка базы лиц из {self.database_path}...")
+        
+        if not os.path.exists(self.database_path):
+            print(f"Папка {self.database_path} не найдена! Создаем...")
+            os.makedirs(self.database_path, exist_ok=True)
+            self.loaded = True
+            return
+        
+        # Поддерживаемые форматы изображений
+        image_extensions = ['*.jpg', '*.jpeg', '*.png', '*.bmp', '*.tiff']
+        image_paths = []
+        
+        for ext in image_extensions:
+            image_paths.extend(glob.glob(os.path.join(self.database_path, ext)))
+        
+        print(f"Найдено {len(image_paths)} изображений в базе")
+        
+        if len(image_paths) == 0:
+            print("База лиц пуста! Добавьте фото в папку faces_database/")
+            self.loaded = True
+            return
+        
+        self.embeddings = []
+        self.names = []
+        
+        for img_path in image_paths:
+            try:
+                # Загружаем изображение
+                img = cv2.imread(img_path)
+                if img is None:
+                    print(f"Не удалось загрузить: {img_path}")
+                    continue
+                
+                # Конвертируем в RGB
+                rgb_img = cv2.cvtColor(img, cv2.COLOR_BGR2RGB)
+                
+                # Детектируем лица на фото
+                faces = insight_app.get(rgb_img)
+                
+                if len(faces) == 0:
+                    print(f"Лица не найдены на: {img_path}")
+                    continue
+                
+                # Берем первое (и, надеемся, единственное) лицо на фото
+                face = faces[0]
+                
+                # Получаем эмбеддинг (512-мерный вектор)
+                embedding = face.normed_embedding
+                
+                # Получаем имя из названия файла (без расширения)
+                name = os.path.splitext(os.path.basename(img_path))[0]
+                
+                self.embeddings.append(embedding)
+                self.names.append(name)
+                
+                print(f"  Загружено: {name}")
+                
+            except Exception as e:
+                print(f"Ошибка при обработке {img_path}: {e}")
+        
+        if len(self.embeddings) > 0:
+            # Преобразуем в numpy array для быстрых вычислений
+            self.embeddings = np.array(self.embeddings)
+            print(f"База лиц загружена: {len(self.embeddings)} записей")
+        else:
+            print("База лиц пуста после обработки")
+        
+        self.loaded = True
+    
+    def identify_face(self, embedding):
+        """Идентифицирует лицо по эмбеддингу"""
+        if not self.loaded:
+            print("База лиц не загружена!")
+            return None, 0.0
+        
+        if len(self.embeddings) == 0:
+            print("База лиц пуста!")
+            return None, 0.0
+        
+        try:
+            # Преобразуем embedding в правильную форму
+            if embedding.ndim == 1:
+                embedding = embedding.reshape(1, -1)
+            
+            # Вычисляем косинусное сходство со всеми эмбеддингами в базе
+            similarities = cosine_similarity(embedding, self.embeddings)[0]
+            
+            # Находим максимальное сходство
+            max_index = np.argmax(similarities)
+            max_similarity = similarities[max_index]
+                        
+            # Если сходство выше порога - возвращаем имя
+            if max_similarity >= self.similarity_threshold:
+                print(f"Идентифицирован как: {self.names[max_index]}")
+                return self.names[max_index], float(max_similarity)
+            else:
+                print("Сходство ниже порога")
+                return None, float(max_similarity)
+                
+        except Exception as e:
+            print(f"Ошибка при идентификации: {e}")
+            return None, 0.0
+    
+    def add_face(self, embedding, name, insight_app=None):
+        """Добавляет новое лицо в базу (и сохраняет фото)"""
+        if embedding is None:
+            return False
+        
+        # Добавляем в память
+        if len(self.embeddings) == 0:
+            self.embeddings = np.array([embedding])
+        else:
+            self.embeddings = np.vstack([self.embeddings, embedding])
+        
+        self.names.append(name)
+        
+        # Сохраняем фото в базу (если нужно)
+        # Для этого нужен кадр с лицом, который можно передать отдельно
+        
+        print(f"Лицо добавлено в базу: {name}")
+        return True
+    
+    def get_all_names(self):
+        """Возвращает список всех имен в базе"""
+        return self.names.copy()
+    
+    def save_database(self):
+        """Сохраняет базу в файл для быстрой загрузки"""
+        if len(self.embeddings) == 0:
+            return
+        
+        database_file = os.path.join(self.database_path, 'face_database.npz')
+        np.savez_compressed(
+            database_file,
+            embeddings=self.embeddings,
+            names=self.names
+        )
+        print(f"База лиц сохранена в {database_file}")
+    
+    def load_from_file(self):
+        """Загружает базу из файла (если есть)"""
+        database_file = os.path.join(self.database_path, 'face_database.npz')
+        
+        if os.path.exists(database_file):
+            try:
+                data = np.load(database_file, allow_pickle=True)
+                self.embeddings = data['embeddings']
+                self.names = data['names'].tolist()
+                self.loaded = True
+                print(f"База лиц загружена из файла: {len(self.names)} записей")
+                return True
+            except Exception as e:
+                print(f"Ошибка загрузки базы из файла: {e}")
+        
+        return False
+
 # === Функция создания файла калибровки если его нет ===
 def create_calibration_file_if_not_exists(filename='raw_calibration_data.pkl'):
     """Создает файл калибровки с пустыми данными, если он не существует"""
@@ -141,11 +311,11 @@ def clear_calibration_data(filename='raw_calibration_data.pkl'):
 
 # ================== Функция создания информационной панели ==================
 def create_info_panel(people_info, calibration_mode, calibration_counts, fps=None, frame_size=None):
-    """Создает второе окно с информацией о людях"""
+    """Создает второе окно с информацией о людях С ФОТО И ИМЕНАМИ"""
     
-    # Размеры панели - УВЕЛИЧЕНА ВЫСОТА
+    # Размеры панели
     panel_width = 800
-    panel_height = 800  # Увеличено с 600 до 800 пикселей
+    panel_height = 800
     
     # Создаем черную панель
     panel = np.zeros((panel_height, panel_width, 3), dtype=np.uint8)
@@ -197,6 +367,8 @@ def create_info_panel(people_info, calibration_mode, calibration_counts, fps=Non
     
     # === Сводная статистика текущих людей ===
     total_people = len(people_info)
+    # ФИКС: проверяем что name не None
+    identified_count = sum(1 for info in people_info.values() if info.get('name') is not None)
     class_counts = {"listening": 0, "talking": 0, "phone": 0, "unknown": 0}
     
     for info in people_info.values():
@@ -207,41 +379,45 @@ def create_info_panel(people_info, calibration_mode, calibration_counts, fps=Non
             else:
                 class_counts["unknown"] += 1
     
-    # ПРАВАЯ КОЛОНКА: Текущие классы
-    y_pos = 110
+    # ПРАВАЯ КОЛОНКА: Текущие классы и идентификация
+    right_col_x = panel_width // 2 + 20
+    y_pos_right = 110
+    
     # Отображаем общую статистику
-    cv2.putText(panel, f"Total People: {total_people}", (panel_width // 2 + 20, y_pos), 
+    cv2.putText(panel, f"Total People: {total_people}", (right_col_x, y_pos_right), 
                 cv2.FONT_HERSHEY_SIMPLEX, 0.8, (255, 255, 255), 2)
-    y_pos += 30
+    y_pos_right += 25
     
-    cv2.putText(panel, "Current Classes:", (panel_width // 2 + 20, y_pos), 
+    cv2.putText(panel, f"Identified: {identified_count}", (right_col_x, y_pos_right), 
+                cv2.FONT_HERSHEY_SIMPLEX, 0.7, (100, 255, 100) if identified_count > 0 else (200, 200, 200), 1)
+    y_pos_right += 25
+    
+    cv2.putText(panel, "Current Classes:", (right_col_x, y_pos_right), 
                 cv2.FONT_HERSHEY_SIMPLEX, 0.7, (255, 255, 200), 1)
-    y_pos += 25
-    
-    right_col_x = panel_width // 2 + 25
+    y_pos_right += 25
     
     for class_id, class_name in class_labels.items():
         color = class_colors.get(class_id, (255, 255, 255))
         count = class_counts.get(class_name, 0)
         
         # Цветной квадрат в правой колонке
-        cv2.rectangle(panel, (right_col_x, y_pos - 15), (right_col_x + 20, y_pos + 5), color, -1)
-        cv2.putText(panel, f"{class_name}: {count}", (right_col_x + 30, y_pos), 
+        cv2.rectangle(panel, (right_col_x, y_pos_right - 15), (right_col_x + 20, y_pos_right + 5), color, -1)
+        cv2.putText(panel, f"{class_name}: {count}", (right_col_x + 30, y_pos_right), 
                    cv2.FONT_HERSHEY_SIMPLEX, 0.6, (255, 255, 255), 1)
-        y_pos += 25
+        y_pos_right += 25
     
     # Неизвестные (если есть)
     unknown_count = class_counts.get("unknown", 0)
     if unknown_count > 0:
         color = class_colors.get("unknown", (128, 128, 128))
-        cv2.rectangle(panel, (right_col_x, y_pos - 15), (right_col_x + 20, y_pos + 5), color, -1)
-        cv2.putText(panel, f"unknown: {unknown_count}", (right_col_x + 30, y_pos), 
+        cv2.rectangle(panel, (right_col_x, y_pos_right - 15), (right_col_x + 20, y_pos_right + 5), color, -1)
+        cv2.putText(panel, f"unknown: {unknown_count}", (right_col_x + 30, y_pos_right), 
                    cv2.FONT_HERSHEY_SIMPLEX, 0.6, (255, 255, 255), 1)
-        y_pos += 25
+        y_pos_right += 25
     
-    y_pos += 20
+    y_pos_right += 20
     
-    # === Детальная информация по каждому человеку С ФОТО ===
+    # === Детальная информация по каждому человеку С ФОТО И ИМЕНАМИ ===
     cv2.putText(panel, "People Details:", (20, y_pos), cv2.FONT_HERSHEY_SIMPLEX, 0.7, (200, 200, 255), 1)
     y_pos += 30
     
@@ -250,20 +426,20 @@ def create_info_panel(people_info, calibration_mode, calibration_counts, fps=Non
     
     # Начальные позиции для таблицы
     start_y = y_pos
-    photo_size = 60  # Увеличили размер фото
-    row_height = 65  # Увеличили высоту строки
-    col_width = 380  # Ширина колонки
+    photo_size = 60
+    row_height = 65
+    col_width = 380
     col_offset = 20
     
-    # Заголовки таблицы
-    cv2.putText(panel, "ID", (50, start_y), cv2.FONT_HERSHEY_SIMPLEX, 0.6, (255, 255, 0), 1)
-    cv2.putText(panel, "Photo", (80, start_y), cv2.FONT_HERSHEY_SIMPLEX, 0.6, (255, 255, 0), 1)
-    cv2.putText(panel, "Activity", (160, start_y), cv2.FONT_HERSHEY_SIMPLEX, 0.6, (255, 255, 0), 1)
-    cv2.putText(panel, "Position", (280, start_y), cv2.FONT_HERSHEY_SIMPLEX, 0.6, (255, 255, 0), 1)
+    # Заголовки таблицы (ДОБАВЛЕНО ИМЯ)
+    cv2.putText(panel, "ID", (col_offset + 20, start_y), cv2.FONT_HERSHEY_SIMPLEX, 0.6, (255, 255, 0), 1)
+    cv2.putText(panel, "Photo", (col_offset + 60, start_y), cv2.FONT_HERSHEY_SIMPLEX, 0.6, (255, 255, 0), 1)
+    cv2.putText(panel, "Name", (col_offset + 140, start_y), cv2.FONT_HERSHEY_SIMPLEX, 0.6, (255, 255, 0), 1)
+    cv2.putText(panel, "Activity", (col_offset + 220, start_y), cv2.FONT_HERSHEY_SIMPLEX, 0.6, (255, 255, 0), 1)
     y_pos += 30
     
     # Первая колонка
-    first_column_end = panel_height - 100  # Конец первой колонки (оставляем место для инструкций)
+    first_column_end = panel_height - 100
     people_in_first_column = 0
     
     for person_id in sorted_ids:
@@ -272,11 +448,11 @@ def create_info_panel(people_info, calibration_mode, calibration_counts, fps=Non
         # Проверяем, есть ли место в текущей колонке
         if y_pos > first_column_end:
             # Переходим на вторую колонку
-            y_pos = start_y + 30  # Начинаем с той же высоты
-            col_offset = 400  # Смещение для второй колонки
+            y_pos = start_y + 30
+            col_offset = 400
         
         # 1. Отображаем ID
-        cv2.putText(panel, f"{person_id}", (col_offset + 30, y_pos), 
+        cv2.putText(panel, f"{person_id}", (col_offset + 20, y_pos), 
                    cv2.FONT_HERSHEY_SIMPLEX, 0.6, (255, 255, 0), 1)
         
         # 2. Отображаем фото (если есть)
@@ -297,12 +473,12 @@ def create_info_panel(people_info, calibration_mode, calibration_counts, fps=Non
                     photo = cv2.resize(photo, (new_width, new_height))
                 
                 # Вставляем фото в панель
-                x_start = col_offset + 70
+                x_start = col_offset + 60
                 y_start = y_pos - photo_size // 2
                 
                 # Проверяем границы
                 y_start = max(start_y + 10, min(y_start, panel_height - photo_size - 50))
-                x_end = min(x_start + photo.shape[1], col_offset + 150)
+                x_end = min(x_start + photo.shape[1], col_offset + 140)
                 y_end = min(y_start + photo.shape[0], panel_height - 50)
                 
                 if x_end > x_start and y_end > y_start:
@@ -315,24 +491,58 @@ def create_info_panel(people_info, calibration_mode, calibration_counts, fps=Non
             except Exception as e:
                 print(f"Ошибка отображения фото ID {person_id}: {e}")
                 # Показываем placeholder если фото не загружено
-                cv2.putText(panel, "[No Photo]", (col_offset + 70, y_pos), 
+                cv2.putText(panel, "[No Photo]", (col_offset + 60, y_pos), 
                            cv2.FONT_HERSHEY_SIMPLEX, 0.5, (150, 150, 150), 1)
         else:
             # Показываем placeholder если фото нет
-            cv2.putText(panel, "[No Photo]", (col_offset + 70, y_pos), 
+            cv2.putText(panel, "[No Photo]", (col_offset + 60, y_pos), 
                        cv2.FONT_HERSHEY_SIMPLEX, 0.5, (150, 150, 150), 1)
         
-        # 3. Отображаем активность (деятельность)
+        # 3. Отображаем ИМЯ (НОВОЕ!) - ФИКС: проверяем на None
+        name = info.get('name', None)
+        similarity = info.get('similarity', 0.0)
+        
+        if name is not None:
+            # Укорачиваем длинные имена - ФИКС: проверяем что name это строка
+            if isinstance(name, str):
+                display_name = name[:10] + "..." if len(name) > 10 else name
+            else:
+                display_name = str(name)[:10] + "..." if len(str(name)) > 10 else str(name)
+                
+            name_color = (100, 255, 100)  # Зеленый для идентифицированных
+            
+            # Добавляем сходство если оно высокое
+            name_text = display_name
+            if similarity > 0.7:
+                name_text = f"{display_name}({similarity:.1f})"
+            
+            cv2.putText(panel, name_text, (col_offset + 140, y_pos), 
+                       cv2.FONT_HERSHEY_SIMPLEX, 0.6, name_color, 1)
+        else:
+            # Для неидентифицированных
+            unknown_text = "Unknown"
+            if similarity > 0:  # Если была попытка идентификации
+                unknown_text = f"Unknown({similarity:.1f})"
+            
+            cv2.putText(panel, unknown_text, (col_offset + 140, y_pos), 
+                       cv2.FONT_HERSHEY_SIMPLEX, 0.6, (200, 200, 200), 1)
+        
+        # 4. Отображаем активность (деятельность)
         if "prediction" in info:
             pred_label = info["prediction"]
-            color = class_colors.get(1 if pred_label == "listening" else 2 if pred_label == "talking" else 3 if pred_label == "phone" else "unknown", (255, 255, 255))
-            cv2.putText(panel, pred_label, (col_offset + 150, y_pos), 
+            color = class_colors.get(
+                1 if pred_label == "listening" else 
+                2 if pred_label == "talking" else 
+                3 if pred_label == "phone" else "unknown", 
+                (255, 255, 255)
+            )
+            cv2.putText(panel, pred_label, (col_offset + 220, y_pos), 
                        cv2.FONT_HERSHEY_SIMPLEX, 0.6, color, 1)
         
-        # 4. Отображаем позицию (координаты)
-        if "center" in info:
+        # 5. Отображаем позицию (координаты) - если есть место
+        if "center" in info and col_offset == 20:  # Только в первой колонке
             x, y = info["center"]
-            cv2.putText(panel, f"({int(x)}, {int(y)})", (col_offset + 250, y_pos), 
+            cv2.putText(panel, f"({int(x)}, {int(y)})", (col_offset + 300, y_pos), 
                        cv2.FONT_HERSHEY_SIMPLEX, 0.5, (200, 200, 200), 1)
         
         y_pos += row_height
@@ -341,14 +551,18 @@ def create_info_panel(people_info, calibration_mode, calibration_counts, fps=Non
         if col_offset == 20:
             people_in_first_column += 1
     
-    # Инструкции внизу
+    # Инструкции внизу (ОБНОВЛЕННЫЕ)
     y_pos = panel_height - 40
-    instructions = "Press 'c': toggle mode | 'r': clear calibration | 'q': quit"
+    instructions = "Press 'c': toggle mode | 'r': clear calibration | 'a': add to DB | 'd': show DB | 'q': quit"
     cv2.putText(panel, instructions, (20, y_pos), cv2.FONT_HERSHEY_SIMPLEX, 0.5, (100, 255, 100), 1)
     
-    # Информация о количестве людей
-    if len(sorted_ids) > people_in_first_column:
-        cv2.putText(panel, f"Showing {len(sorted_ids)} people", (panel_width - 200, y_pos), 
+    # Информация о количестве людей и идентификации
+    if len(sorted_ids) > 0:
+        info_text = f"Showing {len(sorted_ids)} people"
+        if identified_count > 0:
+            info_text += f" ({identified_count} identified)"
+        
+        cv2.putText(panel, info_text, (panel_width - 250, y_pos), 
                    cv2.FONT_HERSHEY_SIMPLEX, 0.5, (200, 200, 255), 1)
     
     return panel
@@ -523,10 +737,16 @@ class FacePhotoManager:
 # Простой трекер для присвоения ID лицам
 class SimpleFaceTracker:
     def __init__(self, max_distance=100):
-        self.tracked_faces = {}  # id: (center, features)
+        self.tracked_faces = {}  # id: (center, features, name, embedding)
         self.max_distance = max_distance
         self.max_id = 50
+        self.face_database = None  # Ссылка на базу лиц
+        self.identification_cache = {}  # Кэш идентификаций: embedding_hash -> name
         
+    def set_face_database(self, database):
+        """Устанавливает базу лиц для идентификации"""
+        self.face_database = database
+
     def _get_available_id(self):
         """Возвращает первый доступный ID начиная с 0"""
         # Ищем все занятые ID
@@ -536,32 +756,89 @@ class SimpleFaceTracker:
         for i in range(self.max_id):
             if i not in used_ids:
                 return i
-                
+        
         # Если все ID заняты, возвращаем самый старый (первый в словаре)
-        # Это нужно для ограниченного количества треков
-        return list(self.tracked_faces.keys())[0]
+        # Но сначала убедимся что словарь не пустой
+        if self.tracked_faces:
+            return list(self.tracked_faces.keys())[0]
+        else:
+            return 0
     
+    def _get_embedding_hash(self, embedding):
+        """Создает хэш эмбеддинга для кэширования"""
+        if embedding is None or len(embedding) == 0:
+            return None
+        
+        # Преобразуем embedding в байты для хэширования
+        try:
+            # Берем первые 16 значений для хэша
+            if isinstance(embedding, np.ndarray):
+                return hashlib.md5(embedding[:16].tobytes()).hexdigest()
+            else:
+                # Если это список или другой тип
+                embedding_array = np.array(embedding)
+                return hashlib.md5(embedding_array[:16].tobytes()).hexdigest()
+        except Exception as e:
+            print(f"Ошибка создания хэша эмбеддинга: {e}")
+            return None
+
+    def identify_face(self, embedding, face_roi=None):
+        """Идентифицирует лицо с использованием базы и кэша"""
+        if self.face_database is None or embedding is None:
+            return None, 0.0
+        
+        # Проверяем что embedding не пустой
+        if len(embedding) == 0:
+            return None, 0.0
+        
+        embedding_hash = self._get_embedding_hash(embedding)
+        
+        # Проверяем кэш
+        if embedding_hash and embedding_hash in self.identification_cache:
+            cached_result = self.identification_cache[embedding_hash]
+            if cached_result[0] is not None:  # Если в кэше есть имя
+                return cached_result
+        
+        # Идентифицируем через базу
+        name, similarity = self.face_database.identify_face(embedding)
+        
+        # Сохраняем в кэш (даже если не идентифицировали)
+        if embedding_hash:
+            self.identification_cache[embedding_hash] = (name, similarity)
+            
+            # Ограничиваем размер кэша
+            if len(self.identification_cache) > 100:
+                # Удаляем самый старый элемент
+                oldest_key = next(iter(self.identification_cache))
+                del self.identification_cache[oldest_key]
+        
+        return name, similarity
+
     def update(self, current_faces):
         """Обновляет трекер с новыми лицами"""
-        # current_faces: список словарей с ключами 'center', 'features', 'landmarks'
-        
         if not current_faces:
             return []
         
-        # Если нет отслеживаемых лиц, присваиваем ID начиная с 0
+        # Если нет отслеживаемых лиц, присваиваем ID
         if not self.tracked_faces:
             for i, face in enumerate(current_faces):
-                face_id = i % self.max_id  # Начинаем с 0
+                face_id = i % self.max_id
+                name = face.get('name', None)
+                embedding = face.get('embedding', None)
+                
                 self.tracked_faces[face_id] = {
                     'center': face['center'],
                     'features': face['features'],
                     'landmarks': face['landmarks'],
-                    'bbox': face['bbox']
+                    'bbox': face['bbox'],
+                    'name': name,
+                    'embedding': embedding,
+                    'similarity': face.get('similarity', 0.0)
                 }
                 face['id'] = face_id
             return current_faces
         
-        # Ищем соответствия между текущими и отслеживаемыми лицами
+        # Ищем соответствия
         matched_ids = []
         updated_faces = []
         
@@ -582,34 +859,62 @@ class SimpleFaceTracker:
             if matched_id is not None:
                 # Обновляем существующий трек
                 face['id'] = matched_id
+                
+                # Сохраняем имя и эмбеддинг из предыдущего трека (если были)
+                old_name = self.tracked_faces[matched_id].get('name', None)
+                old_embedding = self.tracked_faces[matched_id].get('embedding', None)
+                
+                # Используем имя из предыдущего трека, если оно есть, иначе берем новое
+                new_name = old_name if old_name is not None else face.get('name', None)
+                
+                # Используем эмбеддинг из предыдущего трека, если он есть, иначе берем новый
+                # ФИКС: правильная проверка для numpy массива
+                if old_embedding is not None and len(old_embedding) > 0:
+                    new_embedding = old_embedding
+                else:
+                    new_embedding = face.get('embedding', None)
+                
                 self.tracked_faces[matched_id] = {
                     'center': face['center'],
                     'features': face['features'],
                     'landmarks': face['landmarks'],
-                    'bbox': face['bbox']
+                    'bbox': face['bbox'],
+                    'name': new_name,
+                    'embedding': new_embedding,
+                    'similarity': face.get('similarity', face.get('similarity', 0.0))
                 }
                 matched_ids.append(matched_id)
             else:
-                # Создаем новый трек со свободным ID
+                # Создаем новый трек
                 face_id = self._get_available_id()
                 face['id'] = face_id
                 self.tracked_faces[face_id] = {
                     'center': face['center'],
                     'features': face['features'],
                     'landmarks': face['landmarks'],
-                    'bbox': face['bbox']
+                    'bbox': face['bbox'],
+                    'name': face.get('name', None),
+                    'embedding': face.get('embedding', None),
+                    'similarity': face.get('similarity', 0.0)
                 }
             
             updated_faces.append(face)
         
-        # Удаляем старые треки, которые больше не активны
+        # Удаляем старые треки
         active_ids = [face['id'] for face in updated_faces]
         to_remove = [face_id for face_id in self.tracked_faces if face_id not in active_ids]
         for face_id in to_remove:
             del self.tracked_faces[face_id]
         
         return updated_faces
-    
+# ================== ИНИЦИАЛИЗАЦИЯ БАЗЫ ЛИЦ ==================
+print("\nИнициализация базы лиц...")
+face_database = FaceDatabase(database_path='faces_database', similarity_threshold=0.6)
+
+# Пробуем загрузить из файла, если не получится - загрузим из изображений
+if not face_database.load_from_file():
+    face_database.load_database(insight_face)
+
 # ================== ОСНОВНАЯ ПРОГРАММА ==================
 # === Загружаем данные при старте ===
 print("\nЗагрузка данных и модели...")
@@ -625,6 +930,7 @@ else:
 # Остальные переменные
 selected_tid = None
 tracker = SimpleFaceTracker(max_distance=100)
+tracker.set_face_database(face_database)
 photo_manager = FacePhotoManager(max_photos_per_person=5, photo_size=(100, 100))
 people_info = {}  # Словарь для хранения информации о людях
 
@@ -702,11 +1008,11 @@ while True:
             landmarks_5 = face.kps.tolist() if face.kps is not None else None
             
             if landmarks_5 and len(landmarks_5) == 5:
-                # Bounding box от InsightFace
+                # Bounding box
                 bbox = face.bbox.astype(int)
                 x1, y1, x2, y2 = bbox
                 
-                # Добавляем padding для лучшего отображения лица
+                # Добавляем padding
                 padding = 20
                 h, w = frame.shape[:2]
                 roi_x1 = max(0, x1 - padding)
@@ -714,21 +1020,29 @@ while True:
                 roi_x2 = min(w, x2 + padding)
                 roi_y2 = min(h, y2 + padding)
                 
-                # Извлекаем ROI лица для фото
+                # ROI лица
                 face_roi = frame[roi_y1:roi_y2, roi_x1:roi_x2]
                 
-                # Нормализованные координаты для извлечения фич
+                # Нормализованные координаты
                 global_landmarks = []
                 for point in landmarks_5:
-                    # Сохраняем нормализованные координаты
                     global_x = point[0] / frame.shape[1]
                     global_y = point[1] / frame.shape[0]
                     global_landmarks.append([global_x, global_y])
                 
-                # Извлекаем фичи
+                # Извлекаем фичи для классификации позы
                 features = extract_features_insightface(global_landmarks, frame.shape)
                 
-                # Центр
+                 # Получаем эмбеддинг для идентификации
+                embedding = face.normed_embedding if hasattr(face, 'normed_embedding') else None
+                
+                # Идентифицируем лицо (если есть эмбеддинг)
+                name = None
+                similarity = 0.0
+                if embedding is not None and len(embedding) > 0:
+                    name, similarity = tracker.identify_face(embedding, face_roi)
+                
+                # Центр лица
                 center_x = (x1 + x2) / 2
                 center_y = (y1 + y2) / 2
                 
@@ -737,27 +1051,27 @@ while True:
                     'features': features,
                     'center': (center_x, center_y),
                     'bbox': (x1, y1, x2, y2),
-                    'face_roi': face_roi,  # Сохраняем ROI для фото
+                    'face_roi': face_roi,
+                    'embedding': embedding,
+                    'name': name,
+                    'similarity': similarity,
                     'index': i
                 })
         
-        # ================== ТРЕКИНГ ==================
+        # Трекинг
         tracked_faces = tracker.update(detected_faces)
     else:
-        # Если не обрабатываем этот кадр, используем предыдущие данные для отображения
-        # но обновляем координаты на основе простой экстраполяции
         if 'last_tracked_faces' in locals():
             tracked_faces = last_tracked_faces
         else:
             tracked_faces = []
     
-    # Сохраняем текущие лица для следующего кадра
     if process_this_frame:
         last_tracked_faces = tracked_faces.copy()
     
     # ================== ОТОБРАЖЕНИЕ ==================
     people_info = {}
-    face_data = {}  # Для калибровки
+    face_data = {}
     
     for face in tracked_faces:
         face_id = face['id']
@@ -766,23 +1080,31 @@ while True:
         x1, y1, x2, y2 = face['bbox']
         landmarks = face['landmarks']
         face_roi = face.get('face_roi', None)
+        name = face.get('name', None)
+        similarity = face.get('similarity', 0.0)
         
-        # Сохраняем фото лица (если ROI доступен и обрабатываем этот кадр)
+        # Сохраняем фото
         if process_this_frame and face_roi is not None and face_roi.size > 0:
             quality = photo_manager.get_photo_quality(face_roi)
             photo_manager.add_photo(face_id, face_roi, quality)
         
-        # Рисуем bounding box InsightFace (желтый)
-        cv2.rectangle(display_frame, (x1, y1), (x2, y2), (0, 255, 255), 2)
+        # Рисуем bounding box
+        box_color = (0, 255, 255)  # Желтый по умолчанию
         
-        # Рисуем ключевые точки InsightFace (зеленые) - только если обрабатываем кадр
+        # Меняем цвет если лицо идентифицировано
+        if name:
+            box_color = (0, 165, 255)  # Оранжевый для идентифицированных
+        
+        cv2.rectangle(display_frame, (x1, y1), (x2, y2), box_color, 2)
+        
+        # Ключевые точки
         if process_this_frame:
             for point in landmarks:
                 px = int(point[0] * frame.shape[1])
                 py = int(point[1] * frame.shape[0])
                 cv2.circle(display_frame, (px, py), 3, (0, 255, 0), -1)
         
-        # Предсказание класса
+        # Предсказание класса (позы головы)
         prediction_label = "unknown"
         if not calibration_mode and clf is not None:
             try:
@@ -797,22 +1119,51 @@ while True:
             except Exception as e:
                 print(f"Ошибка предсказания: {e}")
         
-        # Отображаем ID
-        cv2.putText(display_frame, f"ID:{face_id}",
-                   (x1, y1 - 35),
-                   cv2.FONT_HERSHEY_PLAIN, 1.2, (255, 255, 0), 2)
+        # Отображаем ID и имя
+        id_text = f"ID:{face_id}"
+
+        if name is not None and len(str(name)) > 0:
+            # Укорачиваем имя если слишком длинное
+            display_name = str(name)[:15] + "..." if len(str(name)) > 15 else str(name)
+            name_text = f"Name:{display_name}"
+            
+            # Показываем сходство если оно > 0
+            if similarity > 0:
+                name_text += f"({similarity:.2f})"
+            
+            # Цвет для имени
+            name_color = (0, 255, 255)  # Желтый для идентифицированных
+        else:
+            name_text = "Name:Unknown"
+            name_color = (200, 200, 200)  # Серый для неидентифицированных
+
+        # Позиционирование текста (смещаем выше чтобы не перекрывать предсказание позы)
+        cv2.putText(display_frame, id_text,
+                (x1, y1 - 60),  # Подняли выше
+                cv2.FONT_HERSHEY_PLAIN, 1.2, (255, 255, 0), 2)
+
+        cv2.putText(display_frame, name_text,
+                (x1, y1 - 35),  # Подняли выше
+                cv2.FONT_HERSHEY_PLAIN, 1.2, name_color, 2)
+
+        # Предсказание позы теперь ниже
+        cv2.putText(display_frame, prediction_label,
+                (x1, y1 - 10),  # Опустили ниже
+                cv2.FONT_HERSHEY_SIMPLEX, 0.7, color, 2)
         
-        # Сохраняем информацию для панели (включая лучшее фото)
+        # Сохраняем информацию для панели
         best_photo = photo_manager.get_best_photo(face_id)
         people_info[face_id] = {
             'center': center,
             'prediction': prediction_label,
             'bbox': (x1, y1, x2, y2),
             'features': features,
-            'best_photo': best_photo
+            'best_photo': best_photo,
+            'name': name,
+            'similarity': similarity
         }
         
-        # Сохраняем для калибровки
+        # Для калибровки
         face_data[face_id] = (features, (x1, y1))
     
     # ================== ОТОБРАЖЕНИЕ НА ОСНОВНОМ ОКНЕ ==================
@@ -841,6 +1192,15 @@ while True:
     if calibration_mode:
         cv2.putText(display_frame, "0-9: select  ,:listen  .:talk  /:phone",
                     (10, 100), cv2.FONT_HERSHEY_SIMPLEX, 0.6, (0, 255, 0), 1)
+    
+    cv2.imshow("Head Pose Classifier", display_frame)
+
+    # Добавляем информацию о базе лиц
+    if face_database and len(face_database.names) > 0:
+        db_info = f"DB:{len(face_database.names)} faces"
+        cv2.putText(display_frame, db_info,
+                   (10, display_frame.shape[0] - 20),
+                   cv2.FONT_HERSHEY_SIMPLEX, 0.5, (100, 255, 100), 1)
     
     cv2.imshow("Head Pose Classifier", display_frame)
     
@@ -919,6 +1279,45 @@ while True:
             # with open('calibration_data.pkl', 'wb') as f:
             #     pickle.dump(data, f)
             print("Калибровка сохранена!")
+        
+        # НОВАЯ КЛАВИША: 'a' - добавить текущее лицо в базу
+        if key == ord('a') and selected_tid is not None and selected_tid in face_data:
+            # Просим ввести имя
+            print("\n=== ДОБАВЛЕНИЕ ЛИЦА В БАЗУ ===")
+            print("Введите ФИО для лица ID", selected_tid, "(или нажмите Enter для отмены):")
+            
+            # Открываем диалог для ввода имени
+            name = input("ФИО: ").strip()
+            
+            if name:
+                # Находим лицо с выбранным ID
+                for face in tracked_faces:
+                    if face['id'] == selected_tid and 'embedding' in face:
+                        embedding = face['embedding']
+                        if embedding is not None:
+                            success = face_database.add_face(embedding, name)
+                            if success:
+                                print(f"Лицо ID {selected_tid} добавлено в базу как '{name}'")
+                                # Сохраняем базу в файл
+                                face_database.save_database()
+                            else:
+                                print("Ошибка добавления лица в базу")
+                        else:
+                            print("Не удалось получить эмбеддинг лица")
+                        break
+            else:
+                print("Добавление отменено")
+        
+        # НОВАЯ КЛАВИША: 'd' - показать список имен в базе
+        if key == ord('d'):
+            print("\n=== БАЗА ЛИЦ ===")
+            names = face_database.get_all_names()
+            if names:
+                for i, name in enumerate(names):
+                    print(f"{i+1}. {name}")
+            else:
+                print("База лиц пуста")
+            print(f"Всего: {len(names)} записей")
     
     # Обработка кнопки 'r' для очистки калибровки
     if key == ord('r'):
