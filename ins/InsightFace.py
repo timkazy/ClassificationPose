@@ -4,7 +4,7 @@ from sklearn.ensemble import RandomForestClassifier
 import pickle
 import os
 from datetime import datetime
-from insightface.app import FaceAnalysis
+from insightface.app import FaceAnalysis # type: ignore
 import math
 import warnings
 from collections import deque
@@ -29,7 +29,7 @@ class_colors = {
 }
 
 # === Функция создания файла калибровки если его нет ===
-def create_calibration_file_if_not_exists(filename='calibration_data.pkl'):
+def create_calibration_file_if_not_exists(filename='raw_calibration_data.pkl'):
     """Создает файл калибровки с пустыми данными, если он не существует"""
     if not os.path.exists(filename):
         print(f"Файл {filename} не существует. Создаем новый с пустыми данными...")
@@ -72,9 +72,9 @@ def load_and_train_from_file(filename='trained_data.pkl'):
         print(f"Ошибка при загрузке файла {filename}: {e}")
         print("Пытаемся загрузить старую калибровку...")
         # Пробуем загрузить старую калибровку
-        return load_old_calibration()
+        return load_raw_calibration()
 
-def load_old_calibration(filename='calibration_data.pkl'):
+def load_raw_calibration(filename='raw_calibration_data.pkl'):
     """Загружает старую калибровку для совместимости"""
     create_calibration_file_if_not_exists(filename)
     
@@ -124,16 +124,17 @@ def save_raw_data(data, filename='raw_calibration_data.pkl'):
         print(f"Ошибка при сохранении сырых данных: {e}")
 
 # === Функция очистки всех меток калибровки ===
-def clear_calibration_data(filename='calibration_data.pkl'):
+def clear_calibration_data(filename='raw_calibration_data.pkl'):
     """Очищает все метки в файле калибровки"""
     empty_data = {1: [], 2: [], 3: []}
-    with open(filename, 'wb') as f:
-        pickle.dump(empty_data, f)
+    if os.path.exists(filename):
+        with open(filename, 'wb') as f:
+            pickle.dump(empty_data, f)
     
     # Также очищаем сырые данные
-    if os.path.exists('raw_calibration_data.pkl'):
-        with open('raw_calibration_data.pkl', 'wb') as f:
-            pickle.dump(empty_data, f)
+    # if os.path.exists('raw_calibration_data.pkl'):
+    #     with open('raw_calibration_data.pkl', 'wb') as f:
+    #         pickle.dump(empty_data, f)
     
     print(f"Все метки калибровки в {filename} были очищены.")
     return empty_data
@@ -651,7 +652,7 @@ print(" - 's' - обучить модель")
 print(" - 'v' - сохранить калибровку")
 print(" - 'r' - очистить ВСЕ метки калибровки")
 print(" - 'q' - выход")
-print(f" - Настройка пропуска кадров: сейчас каждый {frame_skip_interval + 1}-й кадр обрабатывается")
+print(f" - Настройка пропуска кадров: сейчас каждый {frame_skip_interval}-й кадр обрабатывается")
 
 # Создаем окна заранее
 cv2.namedWindow("Head Pose Classifier", cv2.WINDOW_NORMAL)
@@ -915,8 +916,8 @@ while True:
         
         if key == ord('v'):
             save_raw_data(data, 'raw_calibration_data.pkl')
-            with open('calibration_data.pkl', 'wb') as f:
-                pickle.dump(data, f)
+            # with open('calibration_data.pkl', 'wb') as f:
+            #     pickle.dump(data, f)
             print("Калибровка сохранена!")
     
     # Обработка кнопки 'r' для очистки калибровки
