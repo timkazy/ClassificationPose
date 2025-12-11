@@ -111,10 +111,10 @@ class FaceDatabase:
         
         self.loaded = True
     
-    def identify_face(self, embedding):
+    # В методе identify_face класса FaceDatabase (около строки 116):
+    def identify_face(self, embedding, face_roi=None, face_storage=None):
         """Идентифицирует лицо по эмбеддингу"""
-        if not self.loaded:
-            print("База лиц не загружена!")
+        if not self.loaded or embedding is None:  # ИЗМЕНЕНО: проверяем self.loaded вместо self.face_database
             return None, 0.0
         
         if len(self.embeddings) == 0:
@@ -135,12 +135,10 @@ class FaceDatabase:
                         
             # Если сходство выше порога - возвращаем имя
             if max_similarity >= self.similarity_threshold:
-                print(f"Идентифицирован как: {self.names[max_index]}")
                 return self.names[max_index], float(max_similarity)
             else:
-                print("Сходство ниже порога")
                 return None, float(max_similarity)
-                
+            
         except Exception as e:
             print(f"Ошибка при идентификации: {e}")
             return None, 0.0
@@ -458,45 +456,68 @@ def create_info_panel(people_info, calibration_mode, calibration_counts, fps=Non
         # 2. Отображаем фото (если есть)
         if "best_photo" in info and info["best_photo"] is not None:
             try:
-                # Уменьшаем фото для отображения
-                photo = info["best_photo"].copy()
-                if photo.shape[0] > photo_size or photo.shape[1] > photo_size:
-                    # Сохраняем соотношение сторон
-                    aspect = photo.shape[1] / photo.shape[0]
-                    if aspect > 1:
-                        new_width = photo_size
-                        new_height = int(photo_size / aspect)
-                    else:
-                        new_height = photo_size
-                        new_width = int(photo_size * aspect)
+                # Пробуем получить фото из хранилища для идентифицированных
+                display_photo = None
+                name = info.get('name', None)
+                
+                if name and face_storage and face_storage.has_photo(name):
+                    # Берем фото из хранилища
+                    display_photo = face_storage.get_face_photo(name)
+                else:
+                    # Иначе берем лучшее фото из трекера
+                    display_photo = info["best_photo"]
+                
+                if display_photo is not None:
+                    # Уменьшаем фото для отображения
+                    photo = display_photo.copy()
+                    if photo.shape[0] > photo_size or photo.shape[1] > photo_size:
+                        # Сохраняем соотношение сторон
+                        aspect = photo.shape[1] / photo.shape[0]
+                        if aspect > 1:
+                            new_width = photo_size
+                            new_height = int(photo_size / aspect)
+                        else:
+                            new_height = photo_size
+                            new_width = int(photo_size * aspect)
+                        
+                        photo = cv2.resize(photo, (new_width, new_height))
                     
-                    photo = cv2.resize(photo, (new_width, new_height))
-                
-                # Вставляем фото в панель
-                x_start = col_offset + 60
-                y_start = y_pos - photo_size // 2
-                
-                # Проверяем границы
-                y_start = max(start_y + 10, min(y_start, panel_height - photo_size - 50))
-                x_end = min(x_start + photo.shape[1], col_offset + 140)
-                y_end = min(y_start + photo.shape[0], panel_height - 50)
-                
-                if x_end > x_start and y_end > y_start:
-                    # Обрезаем фото если нужно
-                    photo_cropped = photo[:y_end-y_start, :x_end-x_start]
-                    panel[y_start:y_end, x_start:x_end] = photo_cropped
+                    # Вставляем фото в панель
+                    x_start = col_offset + 60
+                    y_start = y_pos - photo_size // 2
                     
-                    # Рамка вокруг фото
-                    cv2.rectangle(panel, (x_start-1, y_start-1), (x_end+1, y_end+1), (255, 255, 255), 1)
+                    # Проверяем границы
+                    y_start = max(start_y + 10, min(y_start, panel_height - photo_size - 50))
+                    x_end = min(x_start + photo.shape[1], col_offset + 140)
+                    y_end = min(y_start + photo.shape[0], panel_height - 50)
+                    
+                    if x_end > x_start and y_end > y_start:
+                        # Обрезаем фото если нужно
+                        photo_cropped = photo[:y_end-y_start, :x_end-x_start]
+                        panel[y_start:y_end, x_start:x_end] = photo_cropped
+                        
+                        # Рамка вокруг фото
+                        frame_color = (0, 255, 0) if name else (200, 200, 200)  # Зеленая для идентифицированных
+                        cv2.rectangle(panel, (x_start-1, y_start-1), (x_end+1, y_end+1), frame_color, 1)
+                else:
+                    raise ValueError("Photo is None")
+                    
             except Exception as e:
                 print(f"Ошибка отображения фото ID {person_id}: {e}")
                 # Показываем placeholder если фото не загружено
-                cv2.putText(panel, "[No Photo]", (col_offset + 60, y_pos), 
-                           cv2.FONT_HERSHEY_SIMPLEX, 0.5, (150, 150, 150), 1)
+                placeholder_text = "[No Photo]" if not name else "[Saved Photo]"
+                placeholder_color = (150, 150, 150) if not name else (100, 200, 100)
+                
+                cv2.putText(panel, placeholder_text, (col_offset + 60, y_pos), 
+                        cv2.FONT_HERSHEY_SIMPLEX, 0.5, placeholder_color, 1)
         else:
             # Показываем placeholder если фото нет
-            cv2.putText(panel, "[No Photo]", (col_offset + 60, y_pos), 
-                       cv2.FONT_HERSHEY_SIMPLEX, 0.5, (150, 150, 150), 1)
+            name = info.get('name', None)
+            placeholder_text = "[No Photo]" if not name else "[No Photo]"
+            placeholder_color = (150, 150, 150)
+            
+            cv2.putText(panel, placeholder_text, (col_offset + 60, y_pos), 
+                    cv2.FONT_HERSHEY_SIMPLEX, 0.5, placeholder_color, 1)
         
         # 3. Отображаем ИМЯ (НОВОЕ!) - ФИКС: проверяем на None
         name = info.get('name', None)
@@ -734,6 +755,71 @@ class FacePhotoManager:
         
         return min(1.0, max(0.0, quality))
 
+# Добавьте этот класс после FacePhotoManager
+
+class IdentifiedFaceStorage:
+    """Хранит фото идентифицированных людей"""
+    def __init__(self, storage_path='identified_faces'):
+        self.storage_path = storage_path
+        self.face_photos = {}  # name -> photo
+        
+        # Создаем папку для хранения
+        if not os.path.exists(storage_path):
+            os.makedirs(storage_path, exist_ok=True)
+        
+        # Загружаем уже сохраненные фото
+        self.load_saved_photos()
+    
+    def load_saved_photos(self):
+        """Загружает сохраненные фото из файлов"""
+        image_extensions = ['*.jpg', '*.jpeg', '*.png', '*.bmp', '*.tiff']
+        
+        for ext in image_extensions:
+            for img_path in glob.glob(os.path.join(self.storage_path, ext)):
+                try:
+                    name = os.path.splitext(os.path.basename(img_path))[0]
+                    photo = cv2.imread(img_path)
+                    if photo is not None:
+                        self.face_photos[name] = photo
+                        print(f"Загружено фото для: {name}")
+                except Exception as e:
+                    print(f"Ошибка загрузки фото {img_path}: {e}")
+    
+    def save_face_photo(self, name, face_photo):
+        """Сохраняет фото лица в файл и в память"""
+        if face_photo is None or face_photo.size == 0:
+            return False
+        
+        try:
+            # Убедимся, что имя безопасно для файловой системы
+            safe_name = "".join(c if c.isalnum() or c in (' ', '_', '-') else '_' for c in name)
+            safe_name = safe_name.strip()
+            
+            if not safe_name:
+                return False
+            
+            # Сохраняем фото
+            file_path = os.path.join(self.storage_path, f"{safe_name}.jpg")
+            cv2.imwrite(file_path, face_photo)
+            
+            # Сохраняем в память
+            self.face_photos[name] = face_photo.copy()
+            
+            print(f"Фото сохранено для: {name}")
+            return True
+            
+        except Exception as e:
+            print(f"Ошибка сохранения фото для {name}: {e}")
+            return False
+    
+    def get_face_photo(self, name):
+        """Возвращает сохраненное фото по имени"""
+        return self.face_photos.get(name, None)
+    
+    def has_photo(self, name):
+        """Проверяет, есть ли сохраненное фото для имени"""
+        return name in self.face_photos
+
 # Простой трекер для присвоения ID лицам
 class SimpleFaceTracker:
     def __init__(self, max_distance=100):
@@ -742,6 +828,10 @@ class SimpleFaceTracker:
         self.max_id = 50
         self.face_database = None  # Ссылка на базу лиц
         self.identification_cache = {}  # Кэш идентификаций: embedding_hash -> name
+        self.embedding_to_id = {}  # embedding_hash -> face_id
+        self.id_to_embedding = {}  # face_id -> embedding_hash
+        self.id_to_permanent_name = {}  # face_id -> постоянное имя
+        self.identified_ids = set()  # ID которые уже были идентифицированы
         
     def set_face_database(self, database):
         """Устанавливает базу лиц для идентификации"""
@@ -766,6 +856,7 @@ class SimpleFaceTracker:
     
     def _get_embedding_hash(self, embedding):
         """Создает хэш эмбеддинга для кэширования"""
+        # ИСПРАВЛЕНИЕ: Правильная проверка numpy массива
         if embedding is None or len(embedding) == 0:
             return None
         
@@ -782,9 +873,9 @@ class SimpleFaceTracker:
             print(f"Ошибка создания хэша эмбеддинга: {e}")
             return None
 
-    def identify_face(self, embedding, face_roi=None):
+    def identify_face(self, embedding, face_roi=None, face_storage=None):
         """Идентифицирует лицо с использованием базы и кэша"""
-        if self.face_database is None or embedding is None:
+        if self.face_database is None or embedding is None:  # Эта строка уже правильная
             return None, 0.0
         
         # Проверяем что embedding не пустой
@@ -792,6 +883,13 @@ class SimpleFaceTracker:
             return None, 0.0
         
         embedding_hash = self._get_embedding_hash(embedding)
+        
+        # ПРОВЕРЯЕМ: Есть ли уже ID для этого эмбеддинга
+        if embedding_hash and embedding_hash in self.embedding_to_id:
+            face_id = self.embedding_to_id[embedding_hash]
+            # НОВОЕ: Если ID уже был идентифицирован, возвращаем сохраненное имя
+            if face_id in self.id_to_permanent_name:
+                return self.id_to_permanent_name[face_id], 1.0
         
         # Проверяем кэш
         if embedding_hash and embedding_hash in self.identification_cache:
@@ -801,6 +899,19 @@ class SimpleFaceTracker:
         
         # Идентифицируем через базу
         name, similarity = self.face_database.identify_face(embedding)
+    
+        # НОВОЕ: Сохраняем фото если лицо идентифицировано
+        if name and similarity >= 0.6 and face_roi is not None and face_storage is not None:
+            # Сохраняем фото в хранилище
+            if not face_storage.has_photo(name):
+                face_storage.save_face_photo(name, face_roi)
+        
+        # НОВОЕ: Если идентификация успешна, сохраняем как постоянное имя
+        if name and similarity >= 0.6:  # Порог сходства
+            if embedding_hash and embedding_hash in self.embedding_to_id:
+                face_id = self.embedding_to_id[embedding_hash]
+                self.id_to_permanent_name[face_id] = name
+                self.identified_ids.add(face_id)
         
         # Сохраняем в кэш (даже если не идентифицировали)
         if embedding_hash:
@@ -813,90 +924,167 @@ class SimpleFaceTracker:
                 del self.identification_cache[oldest_key]
         
         return name, similarity
-
+    
     def update(self, current_faces):
         """Обновляет трекер с новыми лицами"""
         if not current_faces:
             return []
         
-        # Если нет отслеживаемых лиц, присваиваем ID
+        # Если нет отслеживаемых лиц, присваиваем ID на основе эмбеддинга
         if not self.tracked_faces:
-            for i, face in enumerate(current_faces):
-                face_id = i % self.max_id
-                name = face.get('name', None)
+            for face in current_faces:
                 embedding = face.get('embedding', None)
+                # ИСПРАВЛЕНИЕ: Правильная проверка numpy массива
+                embedding_hash = None
+                if embedding is not None and len(embedding) > 0:
+                    embedding_hash = self._get_embedding_hash(embedding)
+                
+                # Пытаемся найти существующий ID для этого эмбеддинга
+                face_id = None
+                if embedding_hash and embedding_hash in self.embedding_to_id:
+                    face_id = self.embedding_to_id[embedding_hash]
+                else:
+                    # Создаем новый ID
+                    face_id = self._get_available_id()
+                    # Сохраняем связь эмбеддинг -> ID
+                    if embedding_hash:
+                        self.embedding_to_id[embedding_hash] = face_id
+                        self.id_to_embedding[face_id] = embedding_hash
+                
+                # НОВОЕ: Используем сохраненное имя если оно есть
+                saved_name = self.id_to_permanent_name.get(face_id, None)
+                current_name = face.get('name', None)
+                
+                # Приоритет: сохраненное имя > текущее имя
+                final_name = saved_name if saved_name is not None else current_name
                 
                 self.tracked_faces[face_id] = {
                     'center': face['center'],
                     'features': face['features'],
                     'landmarks': face['landmarks'],
                     'bbox': face['bbox'],
-                    'name': name,
+                    'name': final_name,  # Используем финальное имя
                     'embedding': embedding,
+                    'embedding_hash': embedding_hash,  # Сохраняем хэш
                     'similarity': face.get('similarity', 0.0)
                 }
                 face['id'] = face_id
+                face['name'] = final_name  # Обновляем имя в текущем лице
             return current_faces
         
-        # Ищем соответствия
+        # Ищем соответствия на основе эмбеддинга в первую очередь
         matched_ids = []
         updated_faces = []
         
         for face in current_faces:
-            min_dist = float('inf')
+            embedding = face.get('embedding', None)
+            # ИСПРАВЛЕНИЕ: Правильная проверка numpy массива
+            embedding_hash = None
+            if embedding is not None and len(embedding) > 0:
+                embedding_hash = self._get_embedding_hash(embedding)
+            
+            # ШАГ 1: Пробуем сопоставить по эмбеддингу
             matched_id = None
             
-            for face_id, tracked_face in self.tracked_faces.items():
-                if face_id in matched_ids:
-                    continue
-                
-                dist = np.linalg.norm(np.array(face['center']) - np.array(tracked_face['center']))
-                
-                if dist < min_dist and dist < self.max_distance:
-                    min_dist = dist
-                    matched_id = face_id
+            if embedding_hash:
+                # Пытаемся найти ID по эмбеддингу
+                if embedding_hash in self.embedding_to_id:
+                    matched_id = self.embedding_to_id[embedding_hash]
             
+            # ШАГ 2: Если не нашли по эмбеддингу, ищем по расстоянию
+            if matched_id is None:
+                min_dist = float('inf')
+                
+                for face_id, tracked_face in self.tracked_faces.items():
+                    if face_id in matched_ids:
+                        continue
+                    
+                    dist = np.linalg.norm(np.array(face['center']) - np.array(tracked_face['center']))
+                    
+                    if dist < min_dist and dist < self.max_distance:
+                        min_dist = dist
+                        matched_id = face_id
+            
+            # ШАГ 3: Если нашли соответствие
             if matched_id is not None:
                 # Обновляем существующий трек
                 face['id'] = matched_id
                 
+                # Сохраняем связь эмбеддинг -> ID (если есть новый эмбеддинг)
+                if embedding_hash and embedding_hash not in self.embedding_to_id:
+                    self.embedding_to_id[embedding_hash] = matched_id
+                    self.id_to_embedding[matched_id] = embedding_hash
+                
                 # Сохраняем имя и эмбеддинг из предыдущего трека (если были)
                 old_name = self.tracked_faces[matched_id].get('name', None)
                 old_embedding = self.tracked_faces[matched_id].get('embedding', None)
+                old_embedding_hash = self.tracked_faces[matched_id].get('embedding_hash', None)
                 
-                # Используем имя из предыдущего трека, если оно есть, иначе берем новое
-                new_name = old_name if old_name is not None else face.get('name', None)
+                # НОВОЕ: Приоритет имен: сохраненное > старое > новое
+                saved_name = self.id_to_permanent_name.get(matched_id, None)
+                current_name_from_face = face.get('name', None)
                 
-                # Используем эмбеддинг из предыдущего трека, если он есть, иначе берем новый
-                # ФИКС: правильная проверка для numpy массива
-                if old_embedding is not None and len(old_embedding) > 0:
-                    new_embedding = old_embedding
+                # Определяем финальное имя
+                if saved_name is not None:
+                    final_name = saved_name
+                elif old_name is not None:
+                    final_name = old_name
                 else:
-                    new_embedding = face.get('embedding', None)
+                    final_name = current_name_from_face
+                
+                # Используем эмбеддинг из предыдущего трека, если он есть и новый отсутствует
+                # ИСПРАВЛЕНИЕ: Правильная проверка numpy массива
+                if old_embedding is not None and (embedding is None or len(embedding) == 0):
+                    new_embedding = old_embedding
+                    new_embedding_hash = old_embedding_hash
+                else:
+                    new_embedding = embedding
+                    new_embedding_hash = embedding_hash
                 
                 self.tracked_faces[matched_id] = {
                     'center': face['center'],
                     'features': face['features'],
                     'landmarks': face['landmarks'],
                     'bbox': face['bbox'],
-                    'name': new_name,
+                    'name': final_name,
                     'embedding': new_embedding,
+                    'embedding_hash': new_embedding_hash,
                     'similarity': face.get('similarity', face.get('similarity', 0.0))
                 }
+                face['name'] = final_name  # Обновляем имя в текущем лице
                 matched_ids.append(matched_id)
             else:
-                # Создаем новый трек
-                face_id = self._get_available_id()
+                # Создаем новый трек на основе эмбеддинга
+                face_id = None
+                
+                if embedding_hash and embedding_hash in self.embedding_to_id:
+                    # Уже есть ID для этого эмбеддинга
+                    face_id = self.embedding_to_id[embedding_hash]
+                else:
+                    # Создаем новый ID
+                    face_id = self._get_available_id()
+                    # Сохраняем связь эмбеддинг -> ID
+                    if embedding_hash:
+                        self.embedding_to_id[embedding_hash] = face_id
+                        self.id_to_embedding[face_id] = embedding_hash
+                
+                # НОВОЕ: Используем сохраненное имя если оно есть
+                saved_name = self.id_to_permanent_name.get(face_id, None)
+                current_name = face.get('name', None)
+                final_name = saved_name if saved_name is not None else current_name
+                
                 face['id'] = face_id
                 self.tracked_faces[face_id] = {
                     'center': face['center'],
                     'features': face['features'],
                     'landmarks': face['landmarks'],
                     'bbox': face['bbox'],
-                    'name': face.get('name', None),
-                    'embedding': face.get('embedding', None),
+                    'name': final_name,
+                    'embedding': embedding,
+                    'embedding_hash': embedding_hash,
                     'similarity': face.get('similarity', 0.0)
                 }
+                face['name'] = final_name  # Обновляем имя в текущем лице
             
             updated_faces.append(face)
         
@@ -904,12 +1092,63 @@ class SimpleFaceTracker:
         active_ids = [face['id'] for face in updated_faces]
         to_remove = [face_id for face_id in self.tracked_faces if face_id not in active_ids]
         for face_id in to_remove:
+            # Удаляем связь ID -> эмбеддинг
+            if face_id in self.id_to_embedding:
+                embedding_hash = self.id_to_embedding[face_id]
+                if embedding_hash in self.embedding_to_id:
+                    del self.embedding_to_id[embedding_hash]
+                del self.id_to_embedding[face_id]
+            
             del self.tracked_faces[face_id]
         
         return updated_faces
+
+    def assign_id_to_embedding(self, face_id, embedding):
+        """Явно привязывает ID к эмбеддингу"""
+        # ИСПРАВЛЕНИЕ: Правильная проверка numpy массива
+        if embedding is None or len(embedding) == 0:
+            return False
+        
+        embedding_hash = self._get_embedding_hash(embedding)
+        if embedding_hash is None:
+            return False
+        
+        # Сохраняем связь
+        self.embedding_to_id[embedding_hash] = face_id
+        self.id_to_embedding[face_id] = embedding_hash
+        
+        # Обновляем запись в tracked_faces
+        if face_id in self.tracked_faces:
+            self.tracked_faces[face_id]['embedding'] = embedding
+            self.tracked_faces[face_id]['embedding_hash'] = embedding_hash
+        
+        return True
+
+    def set_permanent_name(self, face_id, name):
+        """Устанавливает постоянное имя для ID"""
+        self.id_to_permanent_name[face_id] = name
+        self.identified_ids.add(face_id)
+        
+        # Обновляем имя в текущем треке если он существует
+        if face_id in self.tracked_faces:
+            self.tracked_faces[face_id]['name'] = name
+        
+        return True
+    
+    def get_permanent_name(self, face_id):
+        """Возвращает постоянное имя для ID"""
+        return self.id_to_permanent_name.get(face_id, None)
+    
+    def is_identified(self, face_id):
+        """Проверяет, был ли ID уже идентифицирован"""
+        return face_id in self.identified_ids
+
+    
 # ================== ИНИЦИАЛИЗАЦИЯ БАЗЫ ЛИЦ ==================
 print("\nИнициализация базы лиц...")
-face_database = FaceDatabase(database_path='faces_database', similarity_threshold=0.6)
+face_database = FaceDatabase(database_path='faces_database', similarity_threshold=0.4)
+print("\nИнициализация хранилища идентифицированных лиц...")
+face_storage = IdentifiedFaceStorage(storage_path='identified_faces')
 
 # Пробуем загрузить из файла, если не получится - загрузим из изображений
 if not face_database.load_from_file():
@@ -944,7 +1183,7 @@ frame_skip_counter = 0
 frame_skip_interval = 6  # Обрабатывать каждый N-й кадр
 process_this_frame = True  # Флаг для обработки текущего кадра
 
-video_file = 'video/video2.mp4'
+video_file = 'video/video_cut.mp4'
 video_mode = 'camera'
 cap = cv2.VideoCapture(0 if video_mode == 'camera' else video_file)
 
@@ -957,6 +1196,10 @@ print(" - '/' - добавить phone")
 print(" - 's' - обучить модель")
 print(" - 'v' - сохранить калибровку")
 print(" - 'r' - очистить ВСЕ метки калибровки")
+print(" - 'a' - добавить ФИО человека")
+print(" - 'd' - список всех лиц")
+print(" - 'p' - сохранить фото выбранного человека")
+print(" - 'i' - информация об идентификации")
 print(" - 'q' - выход")
 print(f" - Настройка пропуска кадров: сейчас каждый {frame_skip_interval}-й кадр обрабатывается")
 
@@ -1040,7 +1283,8 @@ while True:
                 name = None
                 similarity = 0.0
                 if embedding is not None and len(embedding) > 0:
-                    name, similarity = tracker.identify_face(embedding, face_roi)
+                    name, similarity = tracker.identify_face(embedding, face_roi, face_storage)
+                    embedding_hash = tracker._get_embedding_hash(embedding)
                 
                 # Центр лица
                 center_x = (x1 + x2) / 2
@@ -1053,6 +1297,7 @@ while True:
                     'bbox': (x1, y1, x2, y2),
                     'face_roi': face_roi,
                     'embedding': embedding,
+                    'embedding_hash': face.get('embedding_hash', None),
                     'name': name,
                     'similarity': similarity,
                     'index': i
@@ -1294,12 +1539,20 @@ while True:
                 for face in tracked_faces:
                     if face['id'] == selected_tid and 'embedding' in face:
                         embedding = face['embedding']
+                        face_roi = face.get('face_roi', None)  # Получаем фото лица
+                        
                         if embedding is not None:
                             success = face_database.add_face(embedding, name)
                             if success:
                                 print(f"Лицо ID {selected_tid} добавлено в базу как '{name}'")
-                                # Сохраняем базу в файл
+                                tracker.set_permanent_name(selected_tid, name)
                                 face_database.save_database()
+                                
+                                # СОХРАНЯЕМ ФОТО АВТОМАТИЧЕСКИ
+                                if face_roi is not None and face_roi.size > 0:
+                                    if not face_storage.has_photo(name):
+                                        face_storage.save_face_photo(name, face_roi)
+                                        print(f"Фото сохранено для: {name}")
                             else:
                                 print("Ошибка добавления лица в базу")
                         else:
@@ -1307,7 +1560,7 @@ while True:
                         break
             else:
                 print("Добавление отменено")
-        
+
         # НОВАЯ КЛАВИША: 'd' - показать список имен в базе
         if key == ord('d'):
             print("\n=== БАЗА ЛИЦ ===")
@@ -1318,6 +1571,21 @@ while True:
             else:
                 print("База лиц пуста")
             print(f"Всего: {len(names)} записей")
+        
+        if key == ord('p'):  # Сохранить фото выбранного человека
+            if selected_tid is not None and selected_tid in people_info:
+                info = people_info[selected_tid]
+                name = info.get('name', None)
+                best_photo = info.get('best_photo', None)
+                
+                if name and best_photo is not None:
+                    success = face_storage.save_face_photo(name, best_photo)
+                    if success:
+                        print(f"Фото сохранено для: {name}")
+                    else:
+                        print(f"Не удалось сохранить фото для: {name}")
+                else:
+                    print(f"Нет имени или фото для ID {selected_tid}")
     
     # Обработка кнопки 'r' для очистки калибровки
     if key == ord('r'):
@@ -1336,6 +1604,20 @@ while True:
             print("Калибровка очищена. Переход в режим CALIBRATION.")
         else:
             print("Очистка отменена.")
+    
+    if key == ord('i'):  # Информация об идентификации
+        print("\n=== ИНФОРМАЦИЯ ОБ ИДЕНТИФИКАЦИИ ===")
+        print(f"Порог сходства в базе: {face_database.similarity_threshold}")
+        print(f"Количество лиц в базе: {len(face_database.names)}")
+        
+        # Показать текущие идентификации
+        for face_id, info in people_info.items():
+            name = info.get('name')
+            similarity = info.get('similarity', 0)
+            if name:
+                print(f"ID {face_id}: '{name}' (similarity: {similarity:.3f})")
+    
+
 
 cap.release()
 cv2.destroyAllWindows()
