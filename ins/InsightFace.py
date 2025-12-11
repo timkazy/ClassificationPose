@@ -9,6 +9,9 @@ import math
 import warnings
 from collections import deque
 import hashlib
+# Для идентификации
+import glob
+from sklearn.metrics.pairwise import cosine_similarity
 
 # Подавляем предупреждения
 warnings.filterwarnings('ignore')
@@ -28,9 +31,6 @@ class_colors = {
     "unknown": (128, 128, 128)  # Серый - неизвестно
 }
 
-# Для идентификации
-import glob
-from sklearn.metrics.pairwise import cosine_similarity
 
 class FaceDatabase:
     def __init__(self, database_path='faces_database', similarity_threshold=0.6):
@@ -822,7 +822,7 @@ class IdentifiedFaceStorage:
 
 # Простой трекер для присвоения ID лицам
 class SimpleFaceTracker:
-    def __init__(self, max_distance=100):
+    def __init__(self, max_distance=100, embedding_similarity_threshold=0.4):
         self.tracked_faces = {}  # id: (center, features, name, embedding)
         self.max_distance = max_distance
         self.max_id = 50
@@ -832,6 +832,7 @@ class SimpleFaceTracker:
         self.id_to_embedding = {}  # face_id -> embedding_hash
         self.id_to_permanent_name = {}  # face_id -> постоянное имя
         self.identified_ids = set()  # ID которые уже были идентифицированы
+        self.embedding_similarity_threshold = embedding_similarity_threshold  # НОВОЕ: порог сходства эмбеддингов
         
     def set_face_database(self, database):
         """Устанавливает базу лиц для идентификации"""
@@ -991,68 +992,154 @@ class SimpleFaceTracker:
                 if embedding_hash in self.embedding_to_id:
                     matched_id = self.embedding_to_id[embedding_hash]
             
-            # ШАГ 2: Если не нашли по эмбеддингу, ищем по расстоянию
+            # ШАГ 2: Если не нашли по эмбеддингу, ищем по расстоянию с проверкой сходства
             if matched_id is None:
-                min_dist = float('inf')
+                # Список кандидатов для сопоставления
+                candidates = []
                 
                 for face_id, tracked_face in self.tracked_faces.items():
                     if face_id in matched_ids:
                         continue
                     
+                    # 1. Расстояние между центрами лиц
                     dist = np.linalg.norm(np.array(face['center']) - np.array(tracked_face['center']))
                     
-                    if dist < min_dist and dist < self.max_distance:
-                        min_dist = dist
-                        matched_id = face_id
+                    # Пропускаем если слишком далеко
+                    if dist > self.max_distance:
+                        continue
+                    
+                    # 2. Сходство эмбеддингов (если есть)
+                    similarity = 0
+                    tracked_embedding = tracked_face.get('embedding')
+                    current_embedding = face.get('embedding')
+                    
+                    if tracked_embedding is not None and current_embedding is not None:
+                        try:
+                            similarity = cosine_similarity(
+                                tracked_embedding.reshape(1, -1), 
+                                current_embedding.reshape(1, -1)
+                            )[0][0]
+                        except:
+                            similarity = 0
+                    
+                    # 3. Размер лица (дополнительный критерий)
+                    tracked_bbox = tracked_face.get('bbox', (0, 0, 0, 0))
+                    current_bbox = face.get('bbox', (0, 0, 0, 0))
+                    
+                    tracked_w = tracked_bbox[2] - tracked_bbox[0]
+                    tracked_h = tracked_bbox[3] - tracked_bbox[1]
+                    current_w = current_bbox[2] - current_bbox[0]
+                    current_h = current_bbox[3] - current_bbox[1]
+                    
+                    tracked_size = tracked_w * tracked_h
+                    current_size = current_w * current_h
+                    
+                    size_ratio = 0
+                    if tracked_size > 0 and current_size > 0:
+                        size_ratio = min(tracked_size, current_size) / max(tracked_size, current_size)
+                    
+                    # Комбинированный score
+                    dist_score = max(0, 1 - dist / self.max_distance)
+                    similarity_score = similarity
+                    size_score = size_ratio
+                    
+                    # Веса: расстояние 50%, сходство 40%, размер 10%
+                    total_score = 0.5 * dist_score + 0.4 * similarity_score + 0.1 * size_score
+                    
+                    # Добавляем в кандидаты если общий score выше порога
+                    if total_score > 0.3:  # Общий порог
+                        candidates.append((face_id, total_score, similarity, size_ratio, dist))
+                
+                # Выбираем лучшего кандидата
+                if candidates:
+                    # Сортируем по общему score (высший score первый)
+                    candidates.sort(key=lambda x: x[1], reverse=True)
+                    best_id, best_score, best_similarity, best_size_ratio, best_dist = candidates[0]
+                    
+                    # Только если сходство эмбеддингов выше порога ИЛИ нет эмбеддингов для сравнения
+                    if best_similarity >= self.embedding_similarity_threshold or best_similarity == 0:
+                        matched_id = best_id
+                        # Отладочная информация
+                        # print(f"Сопоставлен ID {best_id}: dist={best_dist:.1f}, "
+                        #       f"similarity={best_similarity:.3f}, size_ratio={best_size_ratio:.2f}, "
+                        #       f"total_score={best_score:.3f}")
             
             # ШАГ 3: Если нашли соответствие
             if matched_id is not None:
-                # Обновляем существующий трек
-                face['id'] = matched_id
+                # Проверяем сходство эмбеддингов перед обновлением
+                tracked_face = self.tracked_faces[matched_id]
+                tracked_embedding = tracked_face.get('embedding')
+                current_embedding = face.get('embedding')
                 
-                # Сохраняем связь эмбеддинг -> ID (если есть новый эмбеддинг)
-                if embedding_hash and embedding_hash not in self.embedding_to_id:
-                    self.embedding_to_id[embedding_hash] = matched_id
-                    self.id_to_embedding[matched_id] = embedding_hash
+                should_update_name = True
                 
-                # Сохраняем имя и эмбеддинг из предыдущего трека (если были)
-                old_name = self.tracked_faces[matched_id].get('name', None)
-                old_embedding = self.tracked_faces[matched_id].get('embedding', None)
-                old_embedding_hash = self.tracked_faces[matched_id].get('embedding_hash', None)
+                if tracked_embedding is not None and current_embedding is not None:
+                    try:
+                        similarity = cosine_similarity(
+                            tracked_embedding.reshape(1, -1), 
+                            current_embedding.reshape(1, -1)
+                        )[0][0]
+                        
+                        # Если эмбеддинги сильно отличаются, это другой человек
+                        if similarity < self.embedding_similarity_threshold:
+                            print(f"ВНИМАНИЕ: ID {matched_id} - низкое сходство эмбеддингов ({similarity:.3f}), создаем новый ID")
+                            # Создаем новый ID вместо использования старого
+                            should_update_name = False
+                            matched_id = None
+                    except:
+                        # Если не удалось сравнить эмбеддинги, продолжаем с осторожностью
+                        pass
                 
-                # НОВОЕ: Приоритет имен: сохраненное > старое > новое
-                saved_name = self.id_to_permanent_name.get(matched_id, None)
-                current_name_from_face = face.get('name', None)
-                
-                # Определяем финальное имя
-                if saved_name is not None:
-                    final_name = saved_name
-                elif old_name is not None:
-                    final_name = old_name
-                else:
-                    final_name = current_name_from_face
-                
-                # Используем эмбеддинг из предыдущего трека, если он есть и новый отсутствует
-                # ИСПРАВЛЕНИЕ: Правильная проверка numpy массива
-                if old_embedding is not None and (embedding is None or len(embedding) == 0):
-                    new_embedding = old_embedding
-                    new_embedding_hash = old_embedding_hash
-                else:
-                    new_embedding = embedding
-                    new_embedding_hash = embedding_hash
-                
-                self.tracked_faces[matched_id] = {
-                    'center': face['center'],
-                    'features': face['features'],
-                    'landmarks': face['landmarks'],
-                    'bbox': face['bbox'],
-                    'name': final_name,
-                    'embedding': new_embedding,
-                    'embedding_hash': new_embedding_hash,
-                    'similarity': face.get('similarity', face.get('similarity', 0.0))
-                }
-                face['name'] = final_name  # Обновляем имя в текущем лице
-                matched_ids.append(matched_id)
+                if matched_id is not None:
+                    # Обновляем существующий трек
+                    face['id'] = matched_id
+                    
+                    # Сохраняем связь эмбеддинг -> ID (если есть новый эмбеддинг)
+                    if embedding_hash and embedding_hash not in self.embedding_to_id:
+                        self.embedding_to_id[embedding_hash] = matched_id
+                        self.id_to_embedding[matched_id] = embedding_hash
+                    
+                    # Сохраняем имя и эмбеддинг из предыдущего трека (если были)
+                    old_name = tracked_face.get('name', None)
+                    old_embedding = tracked_face.get('embedding', None)
+                    old_embedding_hash = tracked_face.get('embedding_hash', None)
+                    
+                    # НОВОЕ: Приоритет имен: сохраненное > старое > новое
+                    saved_name = self.id_to_permanent_name.get(matched_id, None)
+                    current_name_from_face = face.get('name', None)
+                    
+                    # Определяем финальное имя (только если should_update_name = True)
+                    if should_update_name:
+                        if saved_name is not None:
+                            final_name = saved_name
+                        elif old_name is not None:
+                            final_name = old_name
+                        else:
+                            final_name = current_name_from_face
+                    else:
+                        # Не обновляем имя, используем старое или сбрасываем
+                        final_name = old_name if old_name else current_name_from_face
+                    
+                    # Используем эмбеддинг из предыдущего трека, если он есть и новый отсутствует
+                    if old_embedding is not None and (embedding is None or len(embedding) == 0):
+                        new_embedding = old_embedding
+                        new_embedding_hash = old_embedding_hash
+                    else:
+                        new_embedding = embedding
+                        new_embedding_hash = embedding_hash
+                    
+                    self.tracked_faces[matched_id] = {
+                        'center': face['center'],
+                        'features': face['features'],
+                        'landmarks': face['landmarks'],
+                        'bbox': face['bbox'],
+                        'name': final_name,
+                        'embedding': new_embedding,
+                        'embedding_hash': new_embedding_hash,
+                        'similarity': face.get('similarity', face.get('similarity', 0.0))
+                    }
+                    face['name'] = final_name  # Обновляем имя в текущем лице
+                    matched_ids.append(matched_id)
             else:
                 # Создаем новый трек на основе эмбеддинга
                 face_id = None
@@ -1098,6 +1185,10 @@ class SimpleFaceTracker:
                 if embedding_hash in self.embedding_to_id:
                     del self.embedding_to_id[embedding_hash]
                 del self.id_to_embedding[face_id]
+            
+            # НЕ удаляем постоянное имя, чтобы сохранить для будущего
+            # del self.id_to_permanent_name[face_id]
+            # self.identified_ids.discard(face_id)
             
             del self.tracked_faces[face_id]
         
@@ -1168,7 +1259,7 @@ else:
 
 # Остальные переменные
 selected_tid = None
-tracker = SimpleFaceTracker(max_distance=100)
+tracker = SimpleFaceTracker(max_distance=100, embedding_similarity_threshold=0.4)
 tracker.set_face_database(face_database)
 photo_manager = FacePhotoManager(max_photos_per_person=5, photo_size=(100, 100))
 people_info = {}  # Словарь для хранения информации о людях
@@ -1552,7 +1643,6 @@ while True:
                                 if face_roi is not None and face_roi.size > 0:
                                     if not face_storage.has_photo(name):
                                         face_storage.save_face_photo(name, face_roi)
-                                        print(f"Фото сохранено для: {name}")
                             else:
                                 print("Ошибка добавления лица в базу")
                         else:
@@ -1571,21 +1661,6 @@ while True:
             else:
                 print("База лиц пуста")
             print(f"Всего: {len(names)} записей")
-        
-        if key == ord('p'):  # Сохранить фото выбранного человека
-            if selected_tid is not None and selected_tid in people_info:
-                info = people_info[selected_tid]
-                name = info.get('name', None)
-                best_photo = info.get('best_photo', None)
-                
-                if name and best_photo is not None:
-                    success = face_storage.save_face_photo(name, best_photo)
-                    if success:
-                        print(f"Фото сохранено для: {name}")
-                    else:
-                        print(f"Не удалось сохранить фото для: {name}")
-                else:
-                    print(f"Нет имени или фото для ID {selected_tid}")
     
     # Обработка кнопки 'r' для очистки калибровки
     if key == ord('r'):
